@@ -2187,7 +2187,142 @@ Resultado
 ###############
 ###############
 
-Quero que me mostre também como parametrizar métricas customizadas (por exemplo, número de requisições por segundo ou fila de mensagens), para que o ASG escale com base em métricas da sua aplicação além de CPU/Memória
+Vamos expandir o padrão para suportar métricas customizadas além de CPU/Memória, como número de requisições por segundo (RPS) ou tamanho de fila de mensagens. 
+Isso é muito útil quando a carga da aplicação não está diretamente ligada ao uso de CPU, mas sim ao throughput ou backlog.
+
+
+1º  Variáveis (modules/ec2-lb/variables.tf)
+Aqui adicionamos a possibilidade de definir métricas customizadas, parametrizando namespace e metric_name
+
+variable "scaling_policies" {
+  description = "Lista de políticas de scaling automático (up e down) para o ASG"
+  type = list(object({
+    name               = string
+    adjustment_type    = string
+    scaling_adjustment = number
+    metric_type        = string   # "CPU", "Memory" ou "Custom"
+    namespace          = optional(string) # Ex: "AWS/ApplicationELB" ou "MyApp/Metrics"
+    metric_name        = optional(string) # Ex: "RequestCount" ou "QueueLength"
+    threshold          = number
+    comparison         = string   # "GreaterThanOrEqualToThreshold" ou "LessThanOrEqualToThreshold"
+    period             = number
+    evaluation         = number
+    statistic          = string   # "Average", "Maximum", etc.
+  }))
+  default = []
+}
+
+
+2º CloudWatch Alarms + Policies (modules/ec2-lb/main.tf)
+Agora o metric_name e namespace são dinâmicos: se for CPU/Memory usamos defaults, se for Custom usamos os valores passados.
+
+resource "aws_autoscaling_policy" "asg_policy" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+
+  name                   = each.value.name
+  autoscaling_group_name = aws_autoscaling_group.ec2_asg.name
+  adjustment_type        = each.value.adjustment_type
+  scaling_adjustment     = each.value.scaling_adjustment
+}
+
+resource "aws_cloudwatch_metric_alarm" "asg_alarm" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+
+  alarm_name          = "${each.value.name}-alarm"
+  comparison_operator = each.value.comparison
+  evaluation_periods  = each.value.evaluation
+
+  metric_name = (
+    each.value.metric_type == "CPU"    ? "CPUUtilization" :
+    each.value.metric_type == "Memory" ? "MemoryUtilization" :
+    each.value.metric_name
+  )
+
+  namespace = (
+    each.value.metric_type == "CPU" || each.value.metric_type == "Memory"
+    ? "AWS/EC2"
+    : each.value.namespace
+  )
+
+  period            = each.value.period
+  statistic         = each.value.statistic
+  threshold         = each.value.threshold
+  alarm_description = "Alarm para ${each.value.metric_type} no ASG"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ec2_asg.name
+  }
+
+  alarm_actions = [aws_autoscaling_policy.asg_policy[each.key].arn]
+}
+
+
+
+3º  Consumidor do módulo (main.tf)
+Agora você pode passar métricas customizadas junto com CPU/Memory:
+
+scaling_policies = [
+  # Scale-up CPU
+  {
+    name               = "cpu-scale-up"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = 1
+    metric_type        = "CPU"
+    threshold          = 70
+    comparison         = "GreaterThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Average"
+  },
+  # Scale-down CPU
+  {
+    name               = "cpu-scale-down"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = -1
+    metric_type        = "CPU"
+    threshold          = 30
+    comparison         = "LessThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Average"
+  },
+  # Scale-up baseado em requisições por segundo (RPS)
+  {
+    name               = "rps-scale-up"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = 2
+    metric_type        = "Custom"
+    namespace          = "AWS/ApplicationELB"
+    metric_name        = "RequestCount"
+    threshold          = 1000
+    comparison         = "GreaterThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Sum"
+  },
+  # Scale-down baseado em fila de mensagens
+  {
+    name               = "queue-scale-down"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = -1
+    metric_type        = "Custom"
+    namespace          = "MyApp/Metrics"
+    metric_name        = "QueueLength"
+    threshold          = 50
+    comparison         = "LessThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Average"
+  }
+]
+
+
+
+Resultado
+- Escala para cima com base em CPU, memória ou número de requisições.
+- Escala para baixo quando CPU/memória estão baixas ou quando a fila de mensagens está pequena.
+- O módulo agora suporta qualquer métrica customizada registrada no CloudWatch, mantendo o mesmo padrão de parametrização.
+
 
 
 ###############
@@ -2424,7 +2559,133 @@ Resultado
 ###############
 ###############
 
-Quero que me mostre também como parametrizar regras de listener (por exemplo, /api/* vai para um TG e /app/* vai para outro), para ter roteamento baseado em path/host?
+Para parametrizar regras de listener com roteamento baseado em path e/ou host, você pode estruturar o módulo de forma que receba essas regras como input e aplique dinamicamente no recurso de listener. 
+
+1º Cadastraremos a variavel necessario em (modules/ec2-lb/variables.tf).
+
+variable "listener_rules" {
+  type = list(object({
+    priority = number
+    host     = string
+    path     = string
+    target_group_arn = string
+  }))
+}
+
+
+
+2º Agora cadastre a entrada no modulo(modules/ec2-lb/main.tf).
+
+resource "aws_lb_listener_rule" "this" {
+  for_each = { for rule in var.listener_rules : "${rule.host}-${rule.path}" => rule }
+
+  listener_arn = aws_lb_listener.front_end.arn
+  priority     = each.value.priority
+
+  action {
+    type             = "forward"
+    target_group_arn = each.value.target_group_arn
+  }
+
+  condition {
+    host_header {
+      values = [each.value.host]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = [each.value.path]
+    }
+  }
+}
+
+3º Consumidor do módulo (main.tf).
+
+listener_rules = [
+  {
+    priority        = 10
+    host            = "api.meuservico.com"
+    path            = "/api/*"
+    target_group_arn = aws_lb_target_group.api.arn
+  },
+  {
+    priority        = 20
+    host            = "app.meuservico.com"
+    path            = "/app/*"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+]
+
+Assim, o módulo fica parametrizável: você só precisa passar a lista de regras como input, e ele cria dinamicamente os listener rules para cada combinação de host/path → target group.
+
+###############
+###############
+
+ Para deixar o input mais flexível e evitar duplicação de regras quando você tem múltiplos paths para o mesmo host, você pode modelar o input como uma lista de objetos onde cada host tem um conjunto de paths. Assim, o módulo gera uma única regra de listener por host, mas com múltiplos .
+
+1º Cadastraremos a variavel necessario em (modules/ec2-lb/variables.tf).
+
+
+variable "listener_rules" {
+  type = list(object({
+    priority        = number
+    host            = string
+    paths           = list(string)
+    target_group_arn = string
+  }))
+}
+
+
+2º Agora cadastre a entrada no modulo(modules/ec2-lb/main.tf).
+
+resource "aws_lb_listener_rule" "this" {
+  for_each = { for rule in var.listener_rules : rule.host => rule }
+
+  listener_arn = aws_lb_listener.front_end.arn
+  priority     = each.value.priority
+
+  action {
+    type             = "forward"
+    target_group_arn = each.value.target_group_arn
+  }
+
+  condition {
+    host_header {
+      values = [each.value.host]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = each.value.paths
+    }
+  }
+}
+
+
+3º Consumidor do módulo (main.tf).
+
+listener_rules = [
+  {
+    priority        = 10
+    host            = "api.meuservico.com"
+    paths           = ["/api/*", "/v1/*", "/v2/*"]
+    target_group_arn = aws_lb_target_group.api.arn
+  },
+  {
+    priority        = 20
+    host            = "app.meuservico.com"
+    paths           = ["/app/*", "/dashboard/*"]
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+]
+
+
+Com isso, você consegue:
+• 	Definir múltiplos paths para o mesmo host sem duplicar regras.
+• 	Manter o input mais limpo e fácil de expandir.
+• 	Garantir que cada regra de listener seja única por host, mas abrangente nos paths.
 
 
 
