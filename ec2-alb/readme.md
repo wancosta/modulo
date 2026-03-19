@@ -1,0 +1,342 @@
+
+
+* Estrutura do Projeto
+
+terraform-aws-ec2-lb/
+├── modules/
+│   └── ec2-lb/
+│       ├── main.tf
+│       ├── variables.tf
+│       ├── outputs.tf
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── backend.tf
+└── README.md
+
+
+
+##### 1º Criar Bucket S3 para o tfstate remoto #####
+####################################################
+No console da AWS ou via CLI:
+
+aws s3 mb s3://meu-tfstate-bucket
+
+##### 2º Configurar o backend remoto (backend.tf) #####
+#######################################################
+
+terraform {
+  backend "s3" {
+    bucket = "meu-tfstate-bucket"
+    key    = "terraform/ec2-lb/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+##### 3º Criar o módulo modules/ec2-lb/main.tf #####
+####################################################
+
+resource "aws_security_group" "ec2_sg" {
+  name        = "ec2-sg"
+  description = "Allow HTTP and SSH"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_instance" "ec2" {
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  tags = {
+    Name = "Terraform-EC2"
+  }
+}
+
+resource "aws_lb" "app_lb" {
+  name               = "app-lb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.ec2_sg.id]
+  subnets            = var.subnets
+
+  tags = {
+    Name = "App-LB"
+  }
+}
+
+##### 4º Definir variáveis (modules/ec2-lb/variables.tf) #####
+##############################################################
+
+variable "vpc_id" {}
+variable "subnets" {
+  type = list(string)
+}
+variable "ami_id" {}
+variable "instance_type" {
+  default = "t2.micro"
+}
+
+##### 5º Outputs (modules/ec2-lb/outputs.tf) #####
+##################################################
+
+output "ec2_public_ip" {
+  value = aws_instance.ec2.public_ip
+}
+
+output "lb_dns_name" {
+  value = aws_lb.app_lb.dns_name
+}
+
+
+#######################################
+##### 6º Usar o módulo no main.tf #####
+#######################################
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source        = "./modules/ec2-lb"
+  vpc_id        = "vpc-123456"
+  subnets       = ["subnet-abc123", "subnet-def456"]
+  ami_id        = "ami-0c55b159cbfafe1f0"
+  instance_type = "t2.micro"
+}
+
+##### 7º Inicializar e aplicar #####
+####################################
+
+terraform init
+terraform plan
+terraform apply -auto-approve
+
+##### 8º Resultado esperado #####
+#################################
+
+- EC2 criada com IP público.
+- Security Group permitindo SSH (22) e HTTP (80).
+- Load Balancer criado e associado à EC2.
+- tfstate armazenado remotamente no S3.
+
+📌 Observações
+- Não utilizamos DynamoDB para lock do state, apenas o bucket S3.
+- É altamente recomendado usar DynamoDB em ambientes de produção para evitar concorrência.
+- Este exemplo é simplificado para fins de aprendizado.
+
+
+
+
+* Estrutura do projeto consumidor
+
+terraform-ec2-lb-deploy/
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── backend.tf
+
+##### 1ª Configurar o backend remoto (backend.tf) #####
+#######################################################
+
+terraform {
+  backend "s3" {
+    bucket = "meu-tfstate-bucket"
+    key    = "terraform/ec2-lb/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+##### 2ª Usar o módulo diretamente do GitHub (main.tf) #####
+############################################################
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source        = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb"
+  vpc_id        = "vpc-123456"
+  subnets       = ["subnet-abc123", "subnet-def456"]
+  ami_id        = "ami-0c55b159cbfafe1f0"
+  instance_type = "t2.micro"
+}
+
+OBS:  Note que o SOURCE aponta para o repositório GitHub.
+Se quiser travar em uma versão/tag específica, basta adicionar "?ref=v1.0.0" ao final:
+Exemplo: "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+
+
+##### 3ª Variávels (variables.tf) #####
+#######################################
+
+variable "vpc_id" {}
+variable "subnets" {
+  type = list(string)
+}
+variable "ami_id" {}
+variable "instance_type" {
+  default = "t2.micro"
+}
+
+##### 4ª Outputs (outputs.tf) #####
+###################################
+
+output "ec2_public_ip" {
+  value = module.ec2_lb.ec2_public_ip
+}
+
+output "lb_dns_name" {
+  value = module.ec2_lb.lb_dns_name
+}
+
+
+* Comandos para executar
+
+
+# Inicializar o projeto e baixar o módulo do GitHub
+terraform init
+
+# Validar o plano
+terraform plan
+
+# Aplicar a infraestrutura
+terraform apply -auto-approve
+
+
+📌 Resultado
+- O Terraform buscará o módulo diretamente no GitHub.
+- Criará a EC2, o Security Group e o Load Balancer.
+- O tfstate será armazenado remotamente no bucket S3.
+
+Quer que eu te mostre também como publicar o módulo no GitHub com versionamento (tags e releases) para que você possa consumir versões específicas de forma mais organizada?
+
+
+###############
+###############
+
+Para provisionar 3 instâncias EC2 usando o módulo que você publicou no GitHub, basta ajustar o módulo para suportar múltiplas instâncias e passar o input adequado.
+Existem duas formas comuns de fazer isso
+
+
+* Opção 1: Usando "count" dentro do módulo
+No seu módulo (modules/ec2-lb/main.tf), altere o recurso da EC2:
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+
+E no "variables.tf" do módulo:
+
+variable "instance_count" {
+  type    = number
+  default = 1
+}
+
+
+* Opção 2: Passando lista de instâncias (mais flexível)
+
+resource "aws_instance" "ec2" {
+  for_each      = toset(var.instances)
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  tags = {
+    Name = "Terraform-EC2-${each.key}"
+  }
+}
+
+E nno Variables.tf:
+
+variable "instances" {
+  type = list(string)
+}
+
+
+
+Projeto consumidor (buscando módulo no GitHub)
+No seu "main.tf":
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3   # 👈 Aqui você define quantas instâncias quer
+}
+
+
+Resultado
+• 	Serão criadas 3 instâncias EC2.
+• 	Todas estarão associadas ao Security Group e ao Load Balancer.
+• 	O tfstate continuará armazenado no bucket S3 remoto.
+
+
+
+
+
+* Passo a Passo para criar e enviar uma tag no GIT.
+
+1. Verifique se está no branch correto
+Normalmente você cria tags a partir do branch principal ( ou ):
+
+git checkout main
+git pull origin main
+
+
+2. Crie a tag localmente
+Existem dois tipos de tags:
+• 	Tag leve (lightweight): apenas um marcador simples.
+• 	Tag anotada (annotated): contém mensagem, autor e data (recomendado para versionamento).
+👉 Exemplo de tag anotada:
+
+git tag -a v1.0.0 -m "Primeira versão estável do módulo EC2-LB"
+
+
+3. Liste as tags criadas
+Para confirmar que a tag foi criada
+
+git tag
+
+
+4. Envie a tag para o GitHub
+
+git push origin v1.0.0
+
+
+Se quiser enviar todas as tags de uma vez:
+git push origin --tags
