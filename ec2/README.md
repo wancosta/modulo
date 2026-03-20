@@ -1,7 +1,10 @@
 
+# Documentação de umm modulo EC2 completo.
 
-* Estrutura do Projeto
+---
+## **Estrutura do Projeto**
 
+```bash
 terraform-aws-ec2-lb/
 ├── modules/
 │   └── ec2-lb/
@@ -14,17 +17,19 @@ terraform-aws-ec2-lb/
 ├── backend.tf
 └── README.md
 
+---
 
+### **Dando inicio ao provisionamento dos requisitos**
+<details>
+<sumary>1º Criar Bucket S3 para o tfstate remoto e configurar:</sumary>
 
-##### 1º Criar Bucket S3 para o tfstate remoto #####
-####################################################
 No console da AWS ou via CLI:
-
+'''bash
 aws s3 mb s3://meu-tfstate-bucket
+'''
 
-##### 2º Configurar o backend remoto (backend.tf) #####
-#######################################################
-
+Configurar o backend remoto (backend.tf).
+'''bash
 terraform {
   backend "s3" {
     bucket = "meu-tfstate-bucket"
@@ -32,6 +37,7 @@ terraform {
     region = "us-east-1"
   }
 }
+'''
 
 ##### 3º Criar o módulo modules/ec2-lb/main.tf #####
 ####################################################
