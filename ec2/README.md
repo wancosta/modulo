@@ -24,12 +24,12 @@ terraform-aws-ec2-lb/
 <sumary>1º Criar Bucket S3 para o tfstate remoto e configurar:</sumary>
 
 No console da AWS ou via CLI:
-'''bash
+```bash
 aws s3 mb s3://meu-tfstate-bucket
-'''
+```
 
 Configurar o backend remoto (backend.tf).
-'''bash
+```bash
 terraform {
   backend "s3" {
     bucket = "meu-tfstate-bucket"
@@ -37,8 +37,8 @@ terraform {
     region = "us-east-1"
   }
 }
-'''
-
+```
+</details>
 ##### 3º Criar o módulo modules/ec2-lb/main.tf #####
 ####################################################
 
