@@ -2,6 +2,7 @@
 
 * Estrutura do Projeto
 
+```bash
 terraform-aws-ec2-lb/
 ├── modules/
 │   └── ec2-lb/
