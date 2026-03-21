@@ -1,0 +1,545 @@
+Para passar inputs de key pair e adicionar um disco extra de 30 GB na sua instância EC2 via Terraform, você precisa ajustar o módulo para aceitar essas variáveis e depois fornecer os valores no main.tf do projeto consumidor.
+
+
+1º Alterar o módulo para suportar key_name e disco extra 
+No arquivo modules/ec2-lb/main.tf
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = 30   # 👈 disco extra de 30 GB
+    volume_type = "gp2"
+  }
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+
+2º  Definir variáveis no módulo (variables.tf)
+
+variable "key_name" {
+  description = "Nome da key pair existente na AWS"
+  type        = string
+}
+
+variable "instance_count" {
+  description = "Número de instâncias EC2"
+  type        = number
+  default     = 1
+}
+
+
+3º Consumir o módulo no projeto (main.tf)
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3          # 👈 provisiona 3 instâncias
+  key_name       = "minha-key" # 👈 key pair já criada na AWS
+}
+
+
+###############
+###############
+
+
+Para que o consumidor do módulo () consiga passar como input o tamanho do disco e o tipo de disco, você precisa expor essas variáveis no módulo e depois referenciá-las no projeto.
+
+
+1º Ajustar o módulo (modules/ec2-lb/variables.tf)
+Adicione variáveis para o disco:
+
+variable "volume_size" {
+  description = "Tamanho do disco root em GB"
+  type        = number
+  default     = 30
+}
+
+variable "volume_type" {
+  description = "Tipo do disco root (gp2, gp3, io1, etc.)"
+  type        = string
+  default     = "gp2"
+}
+
+
+2º  Usar as variáveis no recurso EC2 (modules/ec2-lb/main.tf)
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+
+3º Consumidor do módulo (main.tf)
+
+Agora, no projeto que consome o módulo, você passa os inputs:
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+
+  # 👇 Inputs para disco
+  volume_size    = 50   # tamanho do disco root em GB
+  volume_type    = "gp3" # tipo do disco root
+}
+
+📌 Resultado
+- Serão criadas 3 instâncias EC2.
+- Cada instância terá um disco root de 50 GB do tipo gp3.
+- Todas usarão a key pair informada para acesso SSH.
+- O tfstate continuará armazenado no bucket S3 remoto.
+
+
+###############
+###############
+
+Vamos estender o módulo para suportar volumes EBS adicionais além do disco root. 
+Assim você poderá passar inputs no consumidor () para definir tamanho, tipo e até quantos discos extras quiser.
+
+
+1º Ajustar o módulo (modules/ec2-lb/variables.tf)
+Adicione uma variável para lista de volumes extras:
+
+variable "extra_volumes" {
+  description = "Lista de volumes EBS adicionais"
+  type = list(object({
+    size = number
+    type = string
+  }))
+  default = []
+}
+
+
+2º Usar a variável no recurso EC2 (modules/ec2-lb/main.tf)
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  dynamic "ebs_block_device" {
+    for_each = var.extra_volumes
+    content {
+      device_name = "/dev/sd${chr(98 + each.key)}" # gera nomes /dev/sdb, /dev/sdc...
+      volume_size = each.value.size
+      volume_type = each.value.type
+    }
+  }
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+3º Consumidor do módulo (main.tf)
+Agora você pode passar os inputs no projeto que consome o módulo:
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+
+  # Disco root
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Volumes extras
+  extra_volumes = [
+    { size = 30, type = "gp2" },
+    { size = 100, type = "gp3" }
+  ]
+}
+
+
+Resultado
+- Cada instância terá um disco root de 50 GB gp3.
+- Além disso, cada instância terá 2 volumes extras:
+- Um de 30 GB gp2.
+- Outro de 100 GB gp3.
+- Todos os volumes serão anexados automaticamente às instâncias
+
+
+
+###############
+###############
+
+Para que os volumes EBS adicionais sejam automaticamente formatados e montados dentro da instância, você pode usar o recurso "user_data" do Terraform. 
+Esse campo permite passar um script que será executado na inicialização da EC2
+
+1º Ajustar o recurso EC2 no módulo (modules/ec2-lb/main.tf)
+Adicione o user_data com um script de inicialização:
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  dynamic "ebs_block_device" {
+    for_each = var.extra_volumes
+    content {
+      device_name = "/dev/sd${chr(98 + each.key)}" # /dev/sdb, /dev/sdc...
+      volume_size = each.value.size
+      volume_type = each.value.type
+    }
+  }
+
+  user_data = <<-EOF
+              #!/bin/bash
+              # Atualiza pacotes
+              yum update -y
+
+              # Formata e monta volumes extras
+              for dev in /dev/sdb /dev/sdc; do
+                mkfs -t ext4 $dev
+                mkdir -p /mnt/$(basename $dev)
+                mount $dev /mnt/$(basename $dev)
+                echo "$dev /mnt/$(basename $dev) ext4 defaults,nofail 0 2" >> /etc/fstab
+              done
+              EOF
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  dynamic "ebs_block_device" {
+    for_each = var.extra_volumes
+    content {
+      device_name = "/dev/sd${chr(98 + each.key)}" # /dev/sdb, /dev/sdc...
+      volume_size = each.value.size
+      volume_type = each.value.type
+    }
+  }
+
+  user_data = <<-EOF
+              #!/bin/bash
+              # Atualiza pacotes
+              yum update -y
+
+              # Formata e monta volumes extras
+              for dev in /dev/sdb /dev/sdc; do
+                mkfs -t ext4 $dev
+                mkdir -p /mnt/$(basename $dev)
+                mount $dev /mnt/$(basename $dev)
+                echo "$dev /mnt/$(basename $dev) ext4 defaults,nofail 0 2" >> /etc/fstab
+              done
+              EOF
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+
+
+2º Consumidor do módulo (main.tf)
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+
+  # Disco root
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Volumes extras
+  extra_volumes = [
+    { size = 30, type = "gp2" },
+    { size = 100, type = "gp3" }
+  ]
+}
+
+
+📌 Resultado
+- Cada instância terá:
+- Disco root de 50 GB gp3.
+- Dois volumes extras: 30 GB gp2 e 100 GB gp3.
+- O script user_data irá:
+- Formatar os volumes extras em ext4.
+- Criar diretórios (/mnt/sdb, /mnt/sdc).
+- Montar os volumes automaticamente.
+- Registrar no /etc/fstab para que sejam montados em cada reboot.
+
+
+###############
+###############
+
+Vamos parametrizar os device names para que você possa controlar diretamente no "main.tf" do consumidor quais volumes serão anexados como /dev/sdb, /dev/sdc, etc.
+
+
+1º Ajustar o módulo (modules/ec2-lb/variables.tf)
+Defina a variável extra_volumes incluindo o campo device_name:
+
+variable "extra_volumes" {
+  description = "Lista de volumes EBS adicionais com device_name"
+  type = list(object({
+    device_name = string
+    size        = number
+    type        = string
+  }))
+  default = []
+}
+
+
+2º Usar a variável no recurso EC2 (modules/ec2-lb/main.tf)
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  dynamic "ebs_block_device" {
+    for_each = var.extra_volumes
+    content {
+      device_name = each.value.device_name
+      volume_size = each.value.size
+      volume_type = each.value.type
+    }
+  }
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+
+              # Formata e monta volumes extras
+              for dev in ${join(" ", [for v in var.extra_volumes : v.device_name])}; do
+                mkfs -t ext4 $dev
+                mkdir -p /mnt/$(basename $dev)
+                mount $dev /mnt/$(basename $dev)
+                echo "$dev /mnt/$(basename $dev) ext4 defaults,nofail 0 2" >> /etc/fstab
+              done
+              EOF
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+
+Note que o "user_data" agora monta dinamicamente todos os devices passados no input.
+
+3º Consumidor do módulo (main.tf)
+Agora você controla os nomes dos devices diretamente:
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+
+  # Disco root
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Volumes extras com device_name explícito
+  extra_volumes = [
+    { device_name = "/dev/sdb", size = 30, type = "gp2" },
+    { device_name = "/dev/sdc", size = 100, type = "gp3" }
+  ]
+}
+
+
+Resultado
+- Cada instância terá um disco root de 50 GB gp3.
+- Dois volumes extras serão anexados:
+- /dev/sdb com 30 GB gp2.
+- /dev/sdc com 100 GB gp3.
+- O user_data formatará e montará automaticamente os volumes em /mnt/sdb e /mnt/sdc.
+- Os volumes estarão configurados no /etc/fstab para serem montados em cada reboot.
+
+
+
+###############
+###############
+
+Parametrizar também os pontos de montagem deixa o módulo muito mais flexível. 
+Assim você pode dizer, por exemplo, que o /dev/sdb deve ser montado em /data e o /dev/sdc em /logs.
+
+
+1º Ajustar o módulo (modules/ec2-lb/variables.tf)
+Agora cada volume extra terá também o campo mount_point:
+
+variable "extra_volumes" {
+  description = "Lista de volumes EBS adicionais com device_name e mount_point"
+  type = list(object({
+    device_name  = string
+    size         = number
+    type         = string
+    mount_point  = string
+  }))
+  default = []
+}
+
+
+2º sar a variável no recurso EC2 (modules/ec2-lb/main.tf)
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  dynamic "ebs_block_device" {
+    for_each = var.extra_volumes
+    content {
+      device_name = each.value.device_name
+      volume_size = each.value.size
+      volume_type = each.value.type
+    }
+  }
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+
+              # Formata e monta volumes extras
+              %{ for vol in extra_volumes ~}
+              mkfs -t ext4 ${vol.device_name}
+              mkdir -p ${vol.mount_point}
+              mount ${vol.device_name} ${vol.mount_point}
+              echo "${vol.device_name} ${vol.mount_point} ext4 defaults,nofail 0 2" >> /etc/fstab
+              %{ endfor ~}
+              EOF
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+
+OBS: Aqui usamos template interpolation no  para iterar sobre os volumes extras e aplicar formatação/montagem conforme os inputs.
+
+
+
+3º Consumidor do módulo (main.tf)
+gora você controla device_name e mount_point diretamente:
+
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+
+  # Disco root
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Volumes extras com device_name e mount_point
+  extra_volumes = [
+    { device_name = "/dev/sdb", size = 30, type = "gp2", mount_point = "/data" },
+    { device_name = "/dev/sdc", size = 100, type = "gp3", mount_point = "/logs" }
+  ]
+}
+
+
+Resultado
+- Cada instância terá um disco root de 50 GB gp3.
+- Dois volumes extras:
+- /dev/sdb (30 GB gp2) montado em /data.
+- /dev/sdc (100 GB gp3) montado em /logs.
+- O user_data formatará e montará automaticamente os volumes nos pontos de montagem definidos.
+- O /etc/fstab será atualizado para garantir que os volumes sejam montados em cada reboot.

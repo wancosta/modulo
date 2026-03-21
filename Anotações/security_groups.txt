@@ -1,0 +1,254 @@
+
+
+vamos tornar o Security Group (SG) totalmente parametrizável via input, permitindo que você defina as regras de entrada (ingress) e saída (egress) diretamente no main.tf do consumidor.
+
+
+1º Ajustar o módulo (modules/ec2-lb/variables.tf)
+Defina variáveis para ingress e egress:
+
+variable "ingress_rules" {
+  description = "Lista de regras de entrada para o SG"
+  type = list(object({
+    from_port   = number
+    to_port     = number
+    protocol    = string
+    cidr_blocks = list(string)
+  }))
+  default = []
+}
+
+variable "egress_rules" {
+  description = "Lista de regras de saída para o SG"
+  type = list(object({
+    from_port   = number
+    to_port     = number
+    protocol    = string
+    cidr_blocks = list(string)
+  }))
+  default = []
+}
+
+
+2º Usar as variáveis no recurso SG (modules/ec2-lb/main.tf)
+
+resource "aws_security_group" "ec2_sg" {
+  name        = "ec2-sg"
+  description = "Security Group parametrizado"
+  vpc_id      = var.vpc_id
+
+  dynamic "ingress" {
+    for_each = var.ingress_rules
+    content {
+      from_port   = ingress.value.from_port
+      to_port     = ingress.value.to_port
+      protocol    = ingress.value.protocol
+      cidr_blocks = ingress.value.cidr_blocks
+    }
+  }
+
+  dynamic "egress" {
+    for_each = var.egress_rules
+    content {
+      from_port   = egress.value.from_port
+      to_port     = egress.value.to_port
+      protocol    = egress.value.protocol
+      cidr_blocks = egress.value.cidr_blocks
+    }
+  }
+}
+
+
+3º Consumidor do módulo (main.tf)
+Agora você pode passar as regras diretamente:
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+
+  # Disco root
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Volumes extras
+  extra_volumes = [
+    { device_name = "/dev/sdb", size = 30, type = "gp2", mount_point = "/data" },
+    { device_name = "/dev/sdc", size = 100, type = "gp3", mount_point = "/logs" }
+  ]
+
+  # Regras de entrada
+  ingress_rules = [
+    { from_port = 22, to_port = 22, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] },
+    { from_port = 80, to_port = 80, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] }
+  ]
+
+  # Regras de saída
+  egress_rules = [
+    { from_port = 0, to_port = 0, protocol = "-1", cidr_blocks = ["0.0.0.0/0"] }
+  ]
+}
+
+
+
+Resultado
+- O Security Group será criado com regras de entrada e saída definidas via input.
+- Você pode adicionar/remover portas e protocolos sem alterar o módulo, apenas ajustando o main.tf.
+- Isso deixa o módulo genérico e reutilizável para diferentes cenários.
+
+
+
+
+#####
+#####
+#####
+
+
+vamos deixar o módulo ainda mais flexível criando Security Groups adicionais via input — por exemplo, um SG para as instâncias e outro para o Load Balancer.
+
+
+1º Ajustar variáveis (modules/ec2-lb/variables.tf)
+Defina uma lista de SGs, cada um com suas regras
+
+variable "security_groups" {
+  description = "Lista de Security Groups adicionais"
+  type = list(object({
+    name          = string
+    description   = string
+    ingress_rules = list(object({
+      from_port   = number
+      to_port     = number
+      protocol    = string
+      cidr_blocks = list(string)
+    }))
+    egress_rules = list(object({
+      from_port   = number
+      to_port     = number
+      protocol    = string
+      cidr_blocks = list(string)
+    }))
+  }))
+  default = []
+}
+
+
+2º Criar SGs dinamicamente (modules/ec2-lb/main.tf)
+
+resource "aws_security_group" "sgs" {
+  for_each    = { for sg in var.security_groups : sg.name => sg }
+  name        = each.value.name
+  description = each.value.description
+  vpc_id      = var.vpc_id
+
+  dynamic "ingress" {
+    for_each = each.value.ingress_rules
+    content {
+      from_port   = ingress.value.from_port
+      to_port     = ingress.value.to_port
+      protocol    = ingress.value.protocol
+      cidr_blocks = ingress.value.cidr_blocks
+    }
+  }
+
+  dynamic "egress" {
+    for_each = each.value.egress_rules
+    content {
+      from_port   = egress.value.from_port
+      to_port     = egress.value.to_port
+      protocol    = egress.value.protocol
+      cidr_blocks = egress.value.cidr_blocks
+    }
+  }
+}
+
+
+3º Associar SGs às instâncias e ao Load Balancer
+
+resource "aws_instance" "ec2" {
+  count         = var.instance_count
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+
+  # associa SG específico das instâncias
+  vpc_security_group_ids = [aws_security_group.sgs["ec2-sg"].id]
+
+  root_block_device {
+    volume_size = var.volume_size
+    volume_type = var.volume_type
+  }
+
+  tags = {
+    Name = "Terraform-EC2-${count.index}"
+  }
+}
+
+resource "aws_lb" "app_lb" {
+  name               = "app-lb"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = var.subnets
+
+  # associa SG específico do LB
+  security_groups    = [aws_security_group.sgs["lb-sg"].id]
+
+  tags = {
+    Name = "App-LB"
+  }
+}
+
+
+4º Consumidor do módulo (main.tf)
+Agora você define os SGs diretamente:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  security_groups = [
+    {
+      name        = "ec2-sg"
+      description = "SG para instâncias EC2"
+      ingress_rules = [
+        { from_port = 22, to_port = 22, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] },
+        { from_port = 80, to_port = 80, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+      egress_rules = [
+        { from_port = 0, to_port = 0, protocol = "-1", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+    },
+    {
+      name        = "lb-sg"
+      description = "SG para Load Balancer"
+      ingress_rules = [
+        { from_port = 80, to_port = 80, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+      egress_rules = [
+        { from_port = 0, to_port = 0, protocol = "-1", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+    }
+  ]
+}
+
+
+Resultado
+- O módulo cria dois Security Groups:
+- ec2-sg para as instâncias EC2 (SSH + HTTP).
+- lb-sg para o Load Balancer (HTTP).
+- Cada recurso (EC2 e LB) é associado ao SG correto.
+- Você pode adicionar quantos SGs quiser, apenas ajustando o input no consumidor.
+

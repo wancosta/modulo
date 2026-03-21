@@ -1,0 +1,134 @@
+Para passar essas tags obrigatórias via input no seu "main.tf"
+você pode usar variáveis no Terraform e depois aplicar no recurso com "default_tags" ou diretamente em "tags".
+Aqui vai um exemplo prático:
+
+##### Definição das variáveis (variables.tf) #####
+##################################################
+
+variable "tags" {
+  description = "Tags obrigatórias para os recursos"
+  type = map(string)
+  default = {
+    Name        = "WEB-APP"
+    Enviroment  = "Dev"
+    Owner       = "Wanderson"
+    Tecnologia  = "EC2"
+    Application = "risk-manager"
+    Team        = "prevenção a Fraude"
+    Region      = "us-east-1"
+    Critical    = "Low"
+  }
+}
+
+##### Uso no (main.tf) #####
+############################
+
+ provider "aws" {
+  region = var.tags["Region"]
+
+  default_tags {
+    tags = var.tags
+  }
+}
+
+resource "aws_instance" "web" {
+  ami           = "ami-1234567890abcdef0"
+  instance_type = "t2.micro"
+
+  tags = var.tags
+}
+
+🔑 Observações
+• 	O bloco "default_tags" garante que todos os recursos criados pelo provider herdem essas tags automaticamente.
+• 	Você ainda pode sobrescrever ou adicionar tags específicas em cada recurso, se necessário.
+• 	Se quiser passar os valores via "terraform.tfvars", basta criar um arquivo com:
+
+##### terraform.tfvars #####
+############################
+
+tags = {
+  Name        = "WEB-APP"
+  Enviroment  = "Dev"
+  Owner       = "Wanderson"
+  Tecnologia  = "EC2"
+  Application = "risk-manager"
+  Team        = "prevenção a Fraude"
+  Region      = "us-east-1"
+  Critical    = "Low"
+}
+
+##########################################
+##########################################
+##########################################
+
+Para Organizar as tags obrigatórias em módulos Terraform de uma forma elegante e reaproveitar em diferentes projetos sem duplicar código.
+
+Vou te mostrar uma estrutura de diretórios modular simples:
+
+infra/
+├── modules/
+│   └── tags/
+│       ├── variables.tf
+│       ├── outputs.tf
+│       └── main.tf
+├── project-a/
+│   └── main.tf
+├── project-b/
+│   └── main.tf
+
+
+📌 Módulo de Tags (modules/tags)
+
+### infra/modules/tags/Variables.tf ###
+#######################################
+
+variable "tags" {
+  description = "Tags obrigatórias para os recursos"
+  type        = map(string)
+}
+
+
+### infra/modules/tags/main.tf ###
+##################################
+
+# O módulo não cria recursos, apenas organiza as tags
+locals {
+  mandatory_tags = var.tags
+}
+
+output "mandatory_tags" {
+  value = local.mandatory_tags
+}
+
+
+📌 Uso em um projeto (project-a/main.tf)
+
+module "tags" {
+  source = "../modules/tags"
+
+  tags = {
+    Name        = "WEB-APP"
+    Enviroment  = "Dev"
+    Owner       = "Wanderson"
+    Tecnologia  = "EC2"
+    Application = "risk-manager"
+    Team        = "prevenção a Fraude"
+    Region      = "us-east-1"
+    Critical    = "Low"
+  }
+}
+
+provider "aws" {
+  region = module.tags.mandatory_tags["Region"]
+
+  default_tags {
+    tags = module.tags.mandatory_tags
+  }
+}
+
+resource "aws_instance" "web" {
+  ami           = "ami-1234567890abcdef0"
+  instance_type = "t2.micro"
+
+  tags = module.tags.mandatory_tags
+}

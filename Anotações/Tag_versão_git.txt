@@ -1,0 +1,36 @@
+##### Passo a Passo para criar e enviar uma tag no GIT #####
+############################################################
+
+1. Verifique se está no branch correto.
+Normalmente você cria tags a partir do branch principal:
+main ou master
+
+git checkout main
+git pull origin main
+
+
+2. Crie a tag localmente.
+Existem dois tipos de tags:
+• 	Tag leve (lightweight): apenas um marcador simples.
+• 	Tag anotada (annotated): contém mensagem, autor e data (recomendado para versionamento).
+
+👉 Exemplo de tag anotada:
+git tag -a V1.0.0
+
+👉 Exemplo de tag anotada:
+git tag -a v1.0.0 -m "Primeira versão estável do módulo EC2-LB"
+
+
+3. Liste as tags criadas
+Para confirmar que a tag foi criada
+
+git tag
+
+
+4. Envie a tag para o GitHub
+
+git push origin v1.0.0
+
+
+Se quiser enviar todas as tags de uma vez:
+git push origin --tags

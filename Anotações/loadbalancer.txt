@@ -1,0 +1,268 @@
+vamos configurar o Load Balancer para fazer o redirect automático de HTTP → HTTPS e usar o certificado já cadastrado no AWS Certificate Manager (ACM), no caso o teste.pactual.net
+
+##
+##
+
+Esse Terraform está configurando o Load Balancer (ALB) da AWS para garantir que todo tráfego seja servido de forma segura via HTTPS, usando um certificado já cadastrado no AWS Certificate Manager (ACM). 
+Vamos detalhar
+
+
+1º Variáveis para certificados (modules/ec2-lb/variables.tf).
+
+variable "certificate_arn" {
+  description = "ARN do certificado SSL/TLS no ACM"
+  type        = string
+}
+
+• 	Cria uma variável para receber o ARN do certificado SSL/TLS que já existe no ACM.
+• 	Esse certificado será usado pelo listener HTTPS para criptografar o tráfego
+
+
+
+2º Listeners com redirect HTTP → HTTPS (modules/ec2-lb/main.tf)
+
+# Listener HTTP (porta 80) que redireciona para HTTPS
+resource "aws_lb_listener" "http_redirect" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+• 	Cria um listener na porta 80 (HTTP).
+• 	Em vez de encaminhar tráfego, ele faz um redirect automático para HTTPS (porta 443).
+• 	Usa código de status 301 (Moved Permanently), garantindo que navegadores sempre passem a usar HTTPS.
+
+
+# Listener HTTPS (porta 443) que usa o certificado ACM
+resource "aws_lb_listener" "https_listener" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = var.certificate_arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg["ec2-tg"].arn
+  }
+}
+
+• 	Cria um listener na porta 443 (HTTPS).
+• 	Usa o certificado passado via variável ().
+• 	Aplica uma SSL Policy padrão da AWS para definir protocolos e cifras.
+• 	Encaminha o tráfego para o Target Group , onde estão as instâncias EC2.
+
+
+
+3º Consumidor do módulo (main.tf)
+Aqui você passa o ARN do certificado já cadastrado no ACM:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Configuração do Auto Scaling Group
+  asg_min_size         = 2
+  asg_max_size         = 5
+  asg_desired_capacity = 3
+
+  # Certificado ACM
+  certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/abcd-efgh-ijkl-mnop"
+
+  # Target Groups
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 300
+      }
+    }
+  ]
+
+  # Listeners (HTTP → HTTPS + HTTPS)
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" },
+    { port = 443, protocol = "HTTPS", target_group = "ec2-tg" }
+  ]
+}
+
+
+Resultado
+- O Load Balancer terá dois listeners:
+- Porta 80 (HTTP) → redireciona automaticamente para HTTPS (443).
+- Porta 443 (HTTPS) → usa o certificado teste.pactual.net do ACM.
+- Todo tráfego será servido de forma segura via HTTPS.
+- O Target Group continua recebendo tráfego das instâncias EC2, mas agora apenas via HTTPS.
+
+
+
+###
+###
+###
+
+
+Perfeito — vamos configurar o Application Load Balancer (ALB) para suportar múltiplos certificados via SNI (Server Name Indication). Assim, o mesmo LB pode servir diferentes domínios, como teste.pactual.net e api.pactual.net.
+
+##
+##
+
+Esse Terraform está configurando um Application Load Balancer (ALB) da AWS para suportar múltiplos certificados SSL/TLS via SNI (Server Name Indication). Assim, o mesmo Load Balancer pode atender diferentes domínios com certificados distintos, garantindo conexões seguras. Vamos detalhar
+
+
+1º Variáveis para múltiplos certificados (modules/ec2-lb/variables.tf)
+
+variable "certificates" {
+  description = "Lista de certificados ACM para o Load Balancer"
+  type        = list(string)
+  default     = []
+}
+
+• 	Permite passar uma lista de ARNs de certificados do ACM.
+• 	O primeiro certificado será usado como principal, e os demais adicionados via SNI
+
+
+
+2º Listener HTTPS com SNI (modules/ec2-lb/main.tf)
+
+# Listener HTTPS principal
+resource "aws_lb_listener" "https_listener" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+
+  # Primeiro certificado obrigatório
+  certificate_arn   = var.certificates[0]
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg["ec2-tg"].arn
+  }
+}
+
+• 	Cria o listener HTTPS na porta 443.
+• 	Usa o primeiro certificado da lista como obrigatório.
+• 	Encaminha tráfego para o target group .
+
+
+# Certificados adicionais via SNI
+resource "aws_lb_listener_certificate" "extra_certs" {
+  for_each        = toset(slice(var.certificates, 1, length(var.certificates)))
+  listener_arn    = aws_lb_listener.https_listener.arn
+  certificate_arn = each.value
+}
+
+• 	Adiciona os certificados extras ao listener HTTPS.
+• 	O ALB escolhe automaticamente o certificado correto com base no domínio solicitado pelo cliente.
+
+
+
+3º Listener HTTP com redirect para HTTPS
+
+resource "aws_lb_listener" "http_redirect" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+• 	Cria um listener na porta 80 (HTTP).
+• 	Redireciona automaticamente todo tráfego para HTTPS (443) com status 301.
+
+
+
+4º Consumidor do módulo (main.tf)
+Agora você passa os certificados diretamente:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Auto Scaling Group
+  asg_min_size         = 2
+  asg_max_size         = 5
+  asg_desired_capacity = 3
+
+  # Certificados ACM (SNI)
+  certificates = [
+    "arn:aws:acm:us-east-1:123456789012:certificate/abcd-efgh-ijkl-mnop", # teste.pactual.net
+    "arn:aws:acm:us-east-1:123456789012:certificate/qrst-uvwx-yzab-cdef"  # api.pactual.net
+  ]
+
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 300
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" },
+    { port = 443, protocol = "HTTPS", target_group = "ec2-tg" }
+  ]
+}
+
+
+Resultado
+- O Load Balancer terá:
+- Listener HTTP (80) → redireciona para HTTPS.
+- Listener HTTPS (443) → usa múltiplos certificados ACM via SNI.
+- Clientes acessando teste.pactual.net ou api.pactual.net receberão o certificado correto automaticamente.
+- O tráfego será encaminhado para o Target Group ec2-tg, com health checks e stickiness configurados.
