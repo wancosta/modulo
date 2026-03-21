@@ -1,0 +1,578 @@
+
+
+Vamos evoluir o módulo para que, em vez de criar instâncias EC2 diretamente, ele crie um Auto Scaling Group (ASG). 
+Assim você pode escalar horizontalmente suas instâncias de forma automática, mantendo a integração com o Load Balancer e os Target Groups.
+
+
+1º Variáveis para ASG (modules/ec2-lb/variables.tf)
+
+variable "asg_min_size" {
+  description = "Número mínimo de instâncias no ASG"
+  type        = number
+  default     = 1
+}
+
+variable "asg_max_size" {
+  description = "Número máximo de instâncias no ASG"
+  type        = number
+  default     = 3
+}
+
+variable "asg_desired_capacity" {
+  description = "Capacidade desejada de instâncias no ASG"
+  type        = number
+  default     = 2
+}
+
+
+2º Launch Template para instâncias (modules/ec2-lb/main.tf)
+O ASG precisa de um Launch Template para definir como as instâncias serão criadas:
+
+resource "aws_launch_template" "ec2_lt" {
+  name_prefix   = "ec2-lt-"
+  image_id      = var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size = var.volume_size
+      volume_type = var.volume_type
+    }
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "Terraform-ASG-Instance"
+    }
+  }
+}
+
+
+3º Auto Scaling Group (modules/ec2-lb/main.tf)
+
+resource "aws_autoscaling_group" "ec2_asg" {
+  name                      = "ec2-asg"
+  min_size                  = var.asg_min_size
+  max_size                  = var.asg_max_size
+  desired_capacity           = var.asg_desired_capacity
+  vpc_zone_identifier        = var.subnets
+  launch_template {
+    id      = aws_launch_template.ec2_lt.id
+    version = "$Latest"
+  }
+
+  target_group_arns = [for tg in aws_lb_target_group.tg : tg.arn]
+
+  tag {
+    key                 = "Name"
+    value               = "Terraform-ASG"
+    propagate_at_launch = true
+  }
+}
+
+
+4º Consumidor do módulo (main.tf)
+Agora você pode parametrizar o ASG diretamente:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Configuração do Auto Scaling Group
+  asg_min_size        = 2
+  asg_max_size        = 5
+  asg_desired_capacity = 3
+
+  # Target Groups e Listeners
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 300
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" }
+  ]
+}
+
+
+Resultado
+- O módulo cria um Launch Template com a configuração da instância.
+- O Auto Scaling Group gerencia automaticamente o número de instâncias entre asg_min_size e asg_max_size.
+- As instâncias são registradas automaticamente nos Target Groups do Load Balancer.
+- O tráfego é distribuído entre todas as instâncias ativas.
+- Você pode escalar horizontalmente de forma automática ou manual ajustando os parâmetros
+
+
+
+
+######
+######
+######
+
+
+
+vamos deixar o módulo capaz de criar políticas de scaling automático para o Auto Scaling Group (ASG), baseadas em métricas como CPU > 70% ou Memória > 85%.
+
+1º Variáveis para políticas de scaling (modules/ec2-lb/variables.tf)
+
+variable "scaling_policies" {
+  description = "Lista de políticas de scaling automático para o ASG"
+  type = list(object({
+    name           = string
+    adjustment_type = string
+    scaling_adjustment = number
+    metric_type    = string   # "CPU" ou "Memory"
+    threshold      = number
+    comparison     = string   # "GreaterThanOrEqualToThreshold", etc.
+    period         = number
+    evaluation     = number
+    statistic      = string   # "Average", "Maximum", etc.
+  }))
+  default = []
+}
+
+
+2º CloudWatch Alarms + Scaling Policies (modules/ec2-lb/main.tf)
+
+resource "aws_autoscaling_policy" "asg_policy" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+  name                   = each.value.name
+  autoscaling_group_name = aws_autoscaling_group.ec2_asg.name
+  adjustment_type        = each.value.adjustment_type
+  scaling_adjustment     = each.value.scaling_adjustment
+}
+
+resource "aws_cloudwatch_metric_alarm" "asg_alarm" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+  alarm_name          = "${each.value.name}-alarm"
+  comparison_operator = each.value.comparison
+  evaluation_periods  = each.value.evaluation
+  metric_name         = each.value.metric_type == "CPU" ? "CPUUtilization" : "MemoryUtilization"
+  namespace           = "AWS/EC2"
+  period              = each.value.period
+  statistic           = each.value.statistic
+  threshold           = each.value.threshold
+  alarm_description   = "Alarm para ${each.value.metric_type} no ASG"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ec2_asg.name
+  }
+  alarm_actions = [aws_autoscaling_policy.asg_policy[each.key].arn]
+}
+
+
+3º Consumidor do módulo (main.tf)
+Agora você pode passar as políticas diretamente:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Configuração do Auto Scaling Group
+  asg_min_size         = 2
+  asg_max_size         = 5
+  asg_desired_capacity = 3
+
+  # Políticas de scaling automático
+  scaling_policies = [
+    {
+      name               = "cpu-scale-up"
+      adjustment_type    = "ChangeInCapacity"
+      scaling_adjustment = 1
+      metric_type        = "CPU"
+      threshold          = 70
+      comparison         = "GreaterThanOrEqualToThreshold"
+      period             = 60
+      evaluation         = 2
+      statistic          = "Average"
+    },
+    {
+      name               = "memory-scale-up"
+      adjustment_type    = "ChangeInCapacity"
+      scaling_adjustment = 1
+      metric_type        = "Memory"
+      threshold          = 85
+      comparison         = "GreaterThanOrEqualToThreshold"
+      period             = 60
+      evaluation         = 2
+      statistic          = "Average"
+    }
+  ]
+
+  # Target Groups e Listeners
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 300
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" }
+  ]
+}
+
+
+
+Resultado
+- O ASG começa com 3 instâncias e pode escalar até 5.
+- Se a CPU média ≥ 70% por 2 períodos consecutivos, o ASG adiciona +1 instância.
+- Se a Memória média ≥ 85% por 2 períodos consecutivos, o ASG também adiciona +1 instância.
+- As instâncias são automaticamente registradas nos Target Groups e recebem tráfego do Load Balancer
+
+
+
+
+######
+######
+######
+
+
+
+vamos completar o ciclo do Auto Scaling Group (ASG) parametrizando também as políticas de scale-down, para reduzir instâncias quando o uso de CPU ou memória estiver baixo, otimizando custos automaticamente.
+
+
+1º Variáveis para scale-down (modules/ec2-lb/variables.tf)
+Você pode usar a mesma estrutura de scaling_policies, mas agora incluir políticas de redução
+
+variable "scaling_policies" {
+  description = "Lista de políticas de scaling automático (up e down) para o ASG"
+  type = list(object({
+    name               = string
+    adjustment_type    = string
+    scaling_adjustment = number
+    metric_type        = string   # "CPU" ou "Memory"
+    threshold          = number
+    comparison         = string   # "GreaterThanOrEqualToThreshold" ou "LessThanOrEqualToThreshold"
+    period             = number
+    evaluation         = number
+    statistic          = string   # "Average", "Maximum", etc.
+  }))
+  default = []
+}
+
+
+
+2º CloudWatch Alarms + Policies (modules/ec2-lb/main.tf)
+O mesmo recurso que usamos para scale-up serve para scale-down, basta mudar o comparison e scaling_adjustment:
+
+resource "aws_autoscaling_policy" "asg_policy" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+  name                   = each.value.name
+  autoscaling_group_name = aws_autoscaling_group.ec2_asg.name
+  adjustment_type        = each.value.adjustment_type
+  scaling_adjustment     = each.value.scaling_adjustment
+}
+
+resource "aws_cloudwatch_metric_alarm" "asg_alarm" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+  alarm_name          = "${each.value.name}-alarm"
+  comparison_operator = each.value.comparison
+  evaluation_periods  = each.value.evaluation
+  metric_name         = each.value.metric_type == "CPU" ? "CPUUtilization" : "MemoryUtilization"
+  namespace           = "AWS/EC2"
+  period              = each.value.period
+  statistic           = each.value.statistic
+  threshold           = each.value.threshold
+  alarm_description   = "Alarm para ${each.value.metric_type} no ASG"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ec2_asg.name
+  }
+  alarm_actions = [aws_autoscaling_policy.asg_policy[each.key].arn]
+}
+
+
+3º Consumidor do módulo (main.tf)
+Agora você pode passar scale-up e scale-down juntos:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Configuração do Auto Scaling Group
+  asg_min_size         = 2
+  asg_max_size         = 5
+  asg_desired_capacity = 3
+
+  # Políticas de scaling automático
+  scaling_policies = [
+    # Scale-up CPU
+    {
+      name               = "cpu-scale-up"
+      adjustment_type    = "ChangeInCapacity"
+      scaling_adjustment = 1
+      metric_type        = "CPU"
+      threshold          = 70
+      comparison         = "GreaterThanOrEqualToThreshold"
+      period             = 60
+      evaluation         = 2
+      statistic          = "Average"
+    },
+    # Scale-down CPU
+    {
+      name               = "cpu-scale-down"
+      adjustment_type    = "ChangeInCapacity"
+      scaling_adjustment = -1
+      metric_type        = "CPU"
+      threshold          = 30
+      comparison         = "LessThanOrEqualToThreshold"
+      period             = 60
+      evaluation         = 2
+      statistic          = "Average"
+    },
+    # Scale-up Memory
+    {
+      name               = "memory-scale-up"
+      adjustment_type    = "ChangeInCapacity"
+      scaling_adjustment = 1
+      metric_type        = "Memory"
+      threshold          = 85
+      comparison         = "GreaterThanOrEqualToThreshold"
+      period             = 60
+      evaluation         = 2
+      statistic          = "Average"
+    },
+    # Scale-down Memory
+    {
+      name               = "memory-scale-down"
+      adjustment_type    = "ChangeInCapacity"
+      scaling_adjustment = -1
+      metric_type        = "Memory"
+      threshold          = 40
+      comparison         = "LessThanOrEqualToThreshold"
+      period             = 60
+      evaluation         = 2
+      statistic          = "Average"
+    }
+  ]
+
+  # Target Groups e Listeners
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 300
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" }
+  ]
+}
+
+
+Resultado
+- O ASG escalará para cima quando CPU ≥ 70% ou Memória ≥ 85%.
+- O ASG escalará para baixo quando CPU ≤ 30% ou Memória ≤ 40%.
+- Isso garante elasticidade: mais instâncias quando há carga alta e menos instâncias quando há carga baixa, otimizando custos.
+- As instâncias continuam sendo registradas automaticamente nos Target Groups e recebendo tráfego do Load Balancer.
+
+
+
+
+######
+######
+######
+
+
+Vamos expandir o padrão para suportar métricas customizadas além de CPU/Memória, como número de requisições por segundo (RPS) ou tamanho de fila de mensagens. 
+Isso é muito útil quando a carga da aplicação não está diretamente ligada ao uso de CPU, mas sim ao throughput ou backlog.
+
+
+1º  Variáveis (modules/ec2-lb/variables.tf)
+Aqui adicionamos a possibilidade de definir métricas customizadas, parametrizando namespace e metric_name
+
+variable "scaling_policies" {
+  description = "Lista de políticas de scaling automático (up e down) para o ASG"
+  type = list(object({
+    name               = string
+    adjustment_type    = string
+    scaling_adjustment = number
+    metric_type        = string   # "CPU", "Memory" ou "Custom"
+    namespace          = optional(string) # Ex: "AWS/ApplicationELB" ou "MyApp/Metrics"
+    metric_name        = optional(string) # Ex: "RequestCount" ou "QueueLength"
+    threshold          = number
+    comparison         = string   # "GreaterThanOrEqualToThreshold" ou "LessThanOrEqualToThreshold"
+    period             = number
+    evaluation         = number
+    statistic          = string   # "Average", "Maximum", etc.
+  }))
+  default = []
+}
+
+
+2º CloudWatch Alarms + Policies (modules/ec2-lb/main.tf)
+Agora o metric_name e namespace são dinâmicos: se for CPU/Memory usamos defaults, se for Custom usamos os valores passados.
+
+resource "aws_autoscaling_policy" "asg_policy" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+
+  name                   = each.value.name
+  autoscaling_group_name = aws_autoscaling_group.ec2_asg.name
+  adjustment_type        = each.value.adjustment_type
+  scaling_adjustment     = each.value.scaling_adjustment
+}
+
+resource "aws_cloudwatch_metric_alarm" "asg_alarm" {
+  for_each = { for p in var.scaling_policies : p.name => p }
+
+  alarm_name          = "${each.value.name}-alarm"
+  comparison_operator = each.value.comparison
+  evaluation_periods  = each.value.evaluation
+
+  metric_name = (
+    each.value.metric_type == "CPU"    ? "CPUUtilization" :
+    each.value.metric_type == "Memory" ? "MemoryUtilization" :
+    each.value.metric_name
+  )
+
+  namespace = (
+    each.value.metric_type == "CPU" || each.value.metric_type == "Memory"
+    ? "AWS/EC2"
+    : each.value.namespace
+  )
+
+  period            = each.value.period
+  statistic         = each.value.statistic
+  threshold         = each.value.threshold
+  alarm_description = "Alarm para ${each.value.metric_type} no ASG"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ec2_asg.name
+  }
+
+  alarm_actions = [aws_autoscaling_policy.asg_policy[each.key].arn]
+}
+
+
+
+3º  Consumidor do módulo (main.tf)
+Agora você pode passar métricas customizadas junto com CPU/Memory:
+
+scaling_policies = [
+  # Scale-up CPU
+  {
+    name               = "cpu-scale-up"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = 1
+    metric_type        = "CPU"
+    threshold          = 70
+    comparison         = "GreaterThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Average"
+  },
+  # Scale-down CPU
+  {
+    name               = "cpu-scale-down"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = -1
+    metric_type        = "CPU"
+    threshold          = 30
+    comparison         = "LessThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Average"
+  },
+  # Scale-up baseado em requisições por segundo (RPS)
+  {
+    name               = "rps-scale-up"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = 2
+    metric_type        = "Custom"
+    namespace          = "AWS/ApplicationELB"
+    metric_name        = "RequestCount"
+    threshold          = 1000
+    comparison         = "GreaterThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Sum"
+  },
+  # Scale-down baseado em fila de mensagens
+  {
+    name               = "queue-scale-down"
+    adjustment_type    = "ChangeInCapacity"
+    scaling_adjustment = -1
+    metric_type        = "Custom"
+    namespace          = "MyApp/Metrics"
+    metric_name        = "QueueLength"
+    threshold          = 50
+    comparison         = "LessThanOrEqualToThreshold"
+    period             = 60
+    evaluation         = 2
+    statistic          = "Average"
+  }
+]
+
+
+
+Resultado
+- Escala para cima com base em CPU, memória ou número de requisições.
+- Escala para baixo quando CPU/memória estão baixas ou quando a fila de mensagens está pequena.
+- O módulo agora suporta qualquer métrica customizada registrada no CloudWatch, mantendo o mesmo padrão de parametrização.

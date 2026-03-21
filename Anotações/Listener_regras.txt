@@ -1,0 +1,205 @@
+
+Para parametrizar regras de listener com roteamento baseado em path e/ou host, você pode estruturar o módulo de forma que receba essas regras como input e aplique dinamicamente no recurso de listener. 
+
+###
+###
+###
+
+Esse trecho de código Terraform está configurando regras de listener para um Application Load Balancer (ALB) da AWS. Vou detalhar cada parte:
+
+1º Cadastraremos a variavel necessario em (modules/ec2-lb/variables.tf).
+
+variable "listener_rules" {
+  type = list(object({
+    priority = number
+    host     = string
+    path     = string
+    target_group_arn = string
+  }))
+}
+
+• 	Define uma lista de objetos, onde cada objeto representa uma regra de roteamento.
+• 	Cada regra precisa ter:
+• 	priority → prioridade da regra (quanto menor o número, maior a precedência).
+• 	host → domínio que será usado como condição (ex: api.meuservico.com ).
+• 	path → caminho da URL que será usado como condição (ex: /api/* ).
+• 	target_group_arn → ARN do target group para onde o tráfego será encaminhado.
+
+
+
+2º Agora cadastre a entrada no modulo(modules/ec2-lb/main.tf).
+
+resource "aws_lb_listener_rule" "this" {
+  for_each = { for rule in var.listener_rules : "${rule.host}-${rule.path}" => rule }
+
+  listener_arn = aws_lb_listener.front_end.arn
+  priority     = each.value.priority
+
+  action {
+    type             = "forward"
+    target_group_arn = each.value.target_group_arn
+  }
+
+  condition {
+    host_header {
+      values = [each.value.host]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = [each.value.path]
+    }
+  }
+}
+
+• 	Cria múltiplas regras de listener dinamicamente, usando (for_each).
+• 	Cada regra é identificada pela combinação (host-path).
+• 	listener_arn → associa as regras a um listener já existente (aws_lb_listener.front_end).
+• 	priority → define a ordem de avaliação das regras.
+• 	action → especifica que o tráfego deve ser encaminhado (forward) para o target group correspondente.
+• 	conditions → duas condições são aplicadas:
+• 	host_header → verifica o domínio da requisição.
+• 	path_pattern → verifica o caminho da URL
+
+
+
+3º Consumidor do módulo (main.tf).
+
+listener_rules = [
+  {
+    priority        = 10
+    host            = "api.meuservico.com"
+    path            = "/api/*"
+    target_group_arn = aws_lb_target_group.api.arn
+  },
+  {
+    priority        = 20
+    host            = "app.meuservico.com"
+    path            = "/app/*"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+]
+
+• 	Regra 1:
+• 	Se o host for (api.meuservico.com) e o path começar com (/api/*), o tráfego vai para o target group (api).
+• 	Regra 2:
+• 	Se o host for (app.meuservico.com) e o path começar com (/app/*), o tráfego vai para o target group (app).
+
+
+
+Assim, o módulo fica parametrizável: 
+você só precisa passar a lista de regras como input, e ele cria dinamicamente os listener rules para cada combinação de host/path → target group.
+
+✅ Em resumo
+Esse Terraform serve para configurar roteamento inteligente no ALB:
+- Ele direciona requisições para diferentes target groups com base no domínio e no caminho da URL.
+- Isso permite separar o tráfego de diferentes aplicações (ex: API e frontend) usando o mesmo load balancer.
+- É útil em arquiteturas de microserviços ou quando você quer hospedar múltiplas aplicações sob o mesmo ALB.
+
+
+
+###########################################
+###########################################
+###########################################
+
+
+
+Para deixar o input mais flexível e evitar duplicação de regras quando você tem múltiplos paths para o mesmo host, você pode modelar o input como uma lista de objetos onde cada host tem um conjunto de paths. 
+Assim, o módulo gera uma única regra de listener por host, mas com múltiplos.
+
+###
+###
+###
+
+Esse Terraform está estruturado para configurar regras de listener em um Application Load Balancer (ALB) da AWS, usando um módulo reutilizável. 
+Vamos entender cada parte:
+
+
+1º Cadastraremos a variavel necessario em (modules/ec2-lb/variables.tf).
+
+
+variable "listener_rules" {
+  type = list(object({
+    priority        = number
+    host            = string
+    paths           = list(string)
+    target_group_arn = string
+  }))
+}
+
+• 	Define uma variável chamada (listener_rules) como uma lista de objetos.
+• 	Cada objeto representa uma regra de roteamento com:
+• 	Priority: prioridade da regra.
+• 	host: domínio da requisição.
+• 	paths: lista de caminhos da URL.
+• 	target_groups_arn: destino para onde o tráfego será encaminhado.
+
+
+
+
+2º Agora cadastre a entrada no modulo(modules/ec2-lb/main.tf).
+
+resource "aws_lb_listener_rule" "this" {
+  for_each = { for rule in var.listener_rules : rule.host => rule }
+
+  listener_arn = aws_lb_listener.front_end.arn
+  priority     = each.value.priority
+
+  action {
+    type             = "forward"
+    target_group_arn = each.value.target_group_arn
+  }
+
+  condition {
+    host_header {
+      values = [each.value.host]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = each.value.paths
+    }
+  }
+}
+
+• 	Cria uma regra de listener para cada item da variável (litener_rules).
+• 	Usa (for_each) com chave baseada no (host), garantindo que cada host tenha uma regra única.
+• 	Encaminha o tráfego para o (target_group_arn) correspondente.
+• 	Aplica duas condições:
+• 	host_header: verifica o domínio.
+• 	path_pattern: verifica se o caminho da URL corresponde a algum dos valores da lista (paths).
+
+
+
+3º Consumidor do módulo (main.tf).
+
+listener_rules = [
+  {
+    priority        = 10
+    host            = "api.meuservico.com"
+    paths           = ["/api/*", "/v1/*", "/v2/*"]
+    target_group_arn = aws_lb_target_group.api.arn
+  },
+  {
+    priority        = 20
+    host            = "app.meuservico.com"
+    paths           = ["/app/*", "/dashboard/*"]
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+]
+
+• 	Define duas regras:
+• 	Para o host (aoi.meuservico.com), cobre múltiplos caminhos (/api/*, /v1/*, /v2/*) e encaminha para o target group (api).
+• 	Para o host (app.meuservico.com), cobre (/app/*) e (/dashboard/*), e encaminha para o target group (app).
+
+✅ Benefícios dessa abordagem
+• 	Evita duplicação: múltiplos paths para o mesmo host são agrupados em uma única regra.
+• 	Facilidade de manutenção: adicionar novos caminhos é simples.
+• 	Organização clara: cada regra é única por host, mas cobre vários endpoints.
+
+Com isso, você consegue:
+• 	Definir múltiplos paths para o mesmo host sem duplicar regras.
+• 	Manter o input mais limpo e fácil de expandir.
+• 	Garantir que cada regra de listener seja única por host, mas abrangente nos paths.

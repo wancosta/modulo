@@ -1,0 +1,661 @@
+
+
+Vamos parametrizar também os Target Groups e Listeners do Load Balancer via input, para que o tráfego seja automaticamente distribuído entre as instâncias criadas.
+
+
+1º Variáveis para Target Groups e Listeners (modules/ec2-lb/variables.tf)
+
+variable "target_groups" {
+  description = "Lista de Target Groups para o Load Balancer"
+  type = list(object({
+    name     = string
+    port     = number
+    protocol = string
+  }))
+  default = []
+}
+
+variable "listeners" {
+  description = "Lista de Listeners para o Load Balancer"
+  type = list(object({
+    port            = number
+    protocol        = string
+    target_group    = string
+  }))
+  default = []
+}
+
+
+
+2º Criar Target Groups e Listeners (modules/ec2-lb/main.tf)
+
+resource "aws_lb_target_group" "tg" {
+  for_each = { for tg in var.target_groups : tg.name => tg }
+  name     = each.value.name
+  port     = each.value.port
+  protocol = each.value.protocol
+  vpc_id   = var.vpc_id
+}
+
+resource "aws_lb_listener" "listener" {
+  for_each          = { for l in var.listeners : l.port => l }
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = each.value.port
+  protocol          = each.value.protocol
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg[each.value.target_group].arn
+  }
+}
+
+# Registrar instâncias EC2 nos Target Groups
+resource "aws_lb_target_group_attachment" "tg_attachment" {
+  for_each = { for idx, inst in aws_instance.ec2 : idx => inst }
+  target_group_arn = aws_lb_target_group.tg["ec2-tg"].arn
+  target_id        = each.value.id
+  port             = 80
+}
+
+
+
+3º Consumidor do módulo (main.tf)
+Agora você define os Target Groups e Listeners diretamente:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Security Groups
+  security_groups = [
+    {
+      name        = "ec2-sg"
+      description = "SG para instâncias EC2"
+      ingress_rules = [
+        { from_port = 22, to_port = 22, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] },
+        { from_port = 80, to_port = 80, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+      egress_rules = [
+        { from_port = 0, to_port = 0, protocol = "-1", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+    },
+    {
+      name        = "lb-sg"
+      description = "SG para Load Balancer"
+      ingress_rules = [
+        { from_port = 80, to_port = 80, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+      egress_rules = [
+        { from_port = 0, to_port = 0, protocol = "-1", cidr_blocks = ["0.0.0.0/0"] }
+      ]
+    }
+  ]
+
+  # Target Groups
+  target_groups = [
+    { name = "ec2-tg", port = 80, protocol = "HTTP" }
+  ]
+
+  # Listeners
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" }
+  ]
+}
+
+
+
+Resultado
+- O módulo cria:
+- Target Group (ec2-tg) para as instâncias EC2.
+- Listener na porta 80 do Load Balancer, que encaminha tráfego para o Target Group.
+- As instâncias EC2 são automaticamente registradas no Target Group.
+- O tráfego recebido pelo Load Balancer será distribuído entre as instâncias EC2.
+
+
+#####
+#####
+#####
+
+
+
+Vamos parametrizar também os health checks do Target Group via input, para que você tenha controle total sobre como o Load Balancer verifica se as instâncias estão saudáveism.
+
+
+1º Variáveis para health checks (modules/ec2-lb/variables.tf)
+Adicione os parâmetros de health check:
+
+variable "health_check" {
+  description = "Configuração de health check para Target Groups"
+  type = object({
+    path                = string
+    port                = number
+    protocol            = string
+    interval            = number
+    timeout             = number
+    healthy_threshold   = number
+    unhealthy_threshold = number
+  })
+  default = {
+    path                = "/"
+    port                = 80
+    protocol            = "HTTP"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 3
+    unhealthy_threshold = 2
+  }
+}
+
+2º Usar health check no Target Group (modules/ec2-lb/main.tf)
+
+resource "aws_lb_target_group" "tg" {
+  for_each = { for tg in var.target_groups : tg.name => tg }
+  name     = each.value.name
+  port     = each.value.port
+  protocol = each.value.protocol
+  vpc_id   = var.vpc_id
+
+  health_check {
+    path                = var.health_check.path
+    port                = var.health_check.port
+    protocol            = var.health_check.protocol
+    interval            = var.health_check.interval
+    timeout             = var.health_check.timeout
+    healthy_threshold   = var.health_check.healthy_threshold
+    unhealthy_threshold = var.health_check.unhealthy_threshold
+  }
+}
+
+
+
+3º Consumidor do módulo (main.tf)
+gora você pode passar os parâmetros de health check diretamente:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  # Target Groups
+  target_groups = [
+    { name = "ec2-tg", port = 80, protocol = "HTTP" }
+  ]
+
+  # Listeners
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" }
+  ]
+
+  # Health check customizado
+  health_check = {
+    path                = "/health"
+    port                = 80
+    protocol            = "HTTP"
+    interval            = 20
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+  }
+}
+
+
+
+Resultado
+- O Target Group terá health check configurado conforme os inputs.
+- O Load Balancer verificará a saúde das instâncias acessando http://<instancia>:80/health.
+- Intervalo de checagem: 20 segundos.
+- Timeout: 5 segundos.
+- Instância será considerada saudável após 2 respostas positivas consecutivas e não saudável após 2 falhas consecutivas.
+
+
+
+#####
+#####
+#####
+
+
+
+Vamos deixar o módulo capaz de lidar com múltiplos Target Groups, cada um com seu próprio health check. 
+Assim você pode ter, por exemplo, um TG verificando  e outro verificando .
+
+1º ariáveis (modules/ec2-lb/variables.tf)
+Agora cada Target Group terá também os parâmetros de health check:
+
+variable "target_groups" {
+  description = "Lista de Target Groups com health checks"
+  type = list(object({
+    name                = string
+    port                = number
+    protocol            = string
+    health_check = object({
+      path                = string
+      port                = number
+      protocol            = string
+      interval            = number
+      timeout             = number
+      healthy_threshold   = number
+      unhealthy_threshold = number
+    })
+  }))
+  default = []
+}
+
+variable "listeners" {
+  description = "Lista de Listeners para o Load Balancer"
+  type = list(object({
+    port         = number
+    protocol     = string
+    target_group = string
+  }))
+  default = []
+}
+
+
+
+2º arget Groups com health checks (modules/ec2-lb/main.tf)
+
+resource "aws_lb_target_group" "tg" {
+  for_each = { for tg in var.target_groups : tg.name => tg }
+  name     = each.value.name
+  port     = each.value.port
+  protocol = each.value.protocol
+  vpc_id   = var.vpc_id
+
+  health_check {
+    path                = each.value.health_check.path
+    port                = each.value.health_check.port
+    protocol            = each.value.health_check.protocol
+    interval            = each.value.health_check.interval
+    timeout             = each.value.health_check.timeout
+    healthy_threshold   = each.value.health_check.healthy_threshold
+    unhealthy_threshold = each.value.health_check.unhealthy_threshold
+  }
+}
+
+resource "aws_lb_listener" "listener" {
+  for_each          = { for l in var.listeners : l.port => l }
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = each.value.port
+  protocol          = each.value.protocol
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg[each.value.target_group].arn
+  }
+}
+
+# Registrar instâncias EC2 em um TG específico (exemplo: ec2-tg)
+resource "aws_lb_target_group_attachment" "tg_attachment" {
+  for_each = { for idx, inst in aws_instance.ec2 : idx => inst }
+  target_group_arn = aws_lb_target_group.tg["ec2-tg"].arn
+  target_id        = each.value.id
+  port             = 80
+}
+
+
+
+3º Consumidor do módulo (main.tf)
+Agora você pode passar múltiplos Target Groups com health checks diferentes:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+    },
+    {
+      name     = "status-tg"
+      port     = 8080
+      protocol = "HTTP"
+      health_check = {
+        path                = "/status"
+        port                = 8080
+        protocol            = "HTTP"
+        interval            = 30
+        timeout             = 5
+        healthy_threshold   = 3
+        unhealthy_threshold = 2
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" },
+    { port = 8080, protocol = "HTTP", target_group = "status-tg" }
+  ]
+}
+
+
+
+Resultado
+- O módulo cria dois Target Groups:
+- ec2-tg verificando /health na porta 80.
+- status-tg verificando /status na porta 8080.
+- O Load Balancer terá dois listeners:
+- Porta 80 encaminhando para ec2-tg.
+- Porta 8080 encaminhando para status-tg.
+- As instâncias EC2 serão registradas no TG principal (ec2-tg), e você pode expandir para registrar em múltiplos TGs se necessário.
+
+
+
+#####
+#####
+#####
+
+
+
+vamos deixar o módulo capaz de registrar automaticamente as mesmas instâncias em múltiplos Target Groups, cada um com seu próprio health check. Assim, uma instância pode servir tanto  quanto .
+
+
+ 1º ariáveis (modules/ec2-lb/variables.tf)
+Já temos a lista de Target Groups com health check. Vamos mantê-la:
+
+variable "target_groups" {
+  description = "Lista de Target Groups com health checks"
+  type = list(object({
+    name     = string
+    port     = number
+    protocol = string
+    health_check = object({
+      path                = string
+      port                = number
+      protocol            = string
+      interval            = number
+      timeout             = number
+      healthy_threshold   = number
+      unhealthy_threshold = number
+    })
+  }))
+  default = []
+}
+
+
+
+2º Criar Target Groups e registrar instâncias em todos (modules/ec2-lb/main.tf)
+
+resource "aws_lb_target_group" "tg" {
+  for_each = { for tg in var.target_groups : tg.name => tg }
+  name     = each.value.name
+  port     = each.value.port
+  protocol = each.value.protocol
+  vpc_id   = var.vpc_id
+
+  health_check {
+    path                = each.value.health_check.path
+    port                = each.value.health_check.port
+    protocol            = each.value.health_check.protocol
+    interval            = each.value.health_check.interval
+    timeout             = each.value.health_check.timeout
+    healthy_threshold   = each.value.health_check.healthy_threshold
+    unhealthy_threshold = each.value.health_check.unhealthy_threshold
+  }
+}
+
+resource "aws_lb_listener" "listener" {
+  for_each          = { for l in var.listeners : l.port => l }
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = each.value.port
+  protocol          = each.value.protocol
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg[each.value.target_group].arn
+  }
+}
+
+# Registrar instâncias em TODOS os Target Groups
+resource "aws_lb_target_group_attachment" "tg_attachment" {
+  for_each = {
+    for tg_name, tg in aws_lb_target_group.tg :
+    tg_name => tg
+  }
+
+  target_group_arn = each.value.arn
+  target_id        = aws_instance.ec2[0].id
+  port             = each.value.port
+}
+
+# Se quiser registrar todas as instâncias em todos os TGs:
+resource "aws_lb_target_group_attachment" "tg_attachment_all" {
+  for_each = {
+    for tg_name, tg in aws_lb_target_group.tg :
+    tg_name => tg
+  }
+
+  target_group_arn = each.value.arn
+  target_id        = aws_instance.ec2[each.key].id
+  port             = each.value.port
+}
+
+OBS: Aqui criamos attachments para cada Target Group e associamos todas as instâncias EC2 a eles
+
+
+
+3º Consumidor do módulo (main.tf)
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+    },
+    {
+      name     = "status-tg"
+      port     = 8080
+      protocol = "HTTP"
+      health_check = {
+        path                = "/status"
+        port                = 8080
+        protocol            = "HTTP"
+        interval            = 30
+        timeout             = 5
+        healthy_threshold   = 3
+        unhealthy_threshold = 2
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" },
+    { port = 8080, protocol = "HTTP", target_group = "status-tg" }
+  ]
+}
+
+
+Resultado
+- O módulo cria dois Target Groups (ec2-tg e status-tg), cada um com seu próprio health check.
+- O Load Balancer terá dois listeners (80 e 8080).
+- Todas as instâncias EC2 serão registradas em ambos os Target Groups.
+- O tráfego recebido na porta 80 será distribuído entre as instâncias servindo /health.
+- O tráfego recebido na porta 8080 será distribuído entre as mesmas instâncias servindo /status.
+
+
+
+
+#####
+#####
+#####
+
+
+
+vamos deixar o módulo capaz de configurar sticky sessions (afinidade de sessão) nos Target Groups, para que um cliente seja sempre direcionado à mesma instância durante a sua sessão.
+
+
+1º - Variáveis (modules/ec2-lb/variables.tf)
+Adicione o campo stickiness dentro da definição de Target Groups
+
+variable "target_groups" {
+  description = "Lista de Target Groups com health checks e stickiness"
+  type = list(object({
+    name     = string
+    port     = number
+    protocol = string
+    health_check = object({
+      path                = string
+      port                = number
+      protocol            = string
+      interval            = number
+      timeout             = number
+      healthy_threshold   = number
+      unhealthy_threshold = number
+    })
+    stickiness = object({
+      enabled  = bool
+      type     = string
+      duration = number
+    })
+  }))
+  default = []
+}
+
+
+
+2º Target Groups com stickiness (modules/ec2-lb/main.tf)
+
+resource "aws_lb_target_group" "tg" {
+  for_each = { for tg in var.target_groups : tg.name => tg }
+  name     = each.value.name
+  port     = each.value.port
+  protocol = each.value.protocol
+  vpc_id   = var.vpc_id
+
+  health_check {
+    path                = each.value.health_check.path
+    port                = each.value.health_check.port
+    protocol            = each.value.health_check.protocol
+    interval            = each.value.health_check.interval
+    timeout             = each.value.health_check.timeout
+    healthy_threshold   = each.value.health_check.healthy_threshold
+    unhealthy_threshold = each.value.health_check.unhealthy_threshold
+  }
+
+  stickiness {
+    enabled  = each.value.stickiness.enabled
+    type     = each.value.stickiness.type
+    cookie_duration = each.value.stickiness.duration
+  }
+}
+
+
+3º Consumidor do módulo (main.tf)
+Agora você pode passar os parâmetros de stickiness junto com os health checks:
+
+module "ec2_lb" {
+  source         = "github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>//modules/ec2-lb?ref=v1.0.0"
+  vpc_id         = "vpc-123456"
+  subnets        = ["subnet-abc123", "subnet-def456"]
+  ami_id         = "ami-0c55b159cbfafe1f0"
+  instance_type  = "t2.micro"
+  instance_count = 3
+  key_name       = "minha-key"
+  volume_size    = 50
+  volume_type    = "gp3"
+
+  target_groups = [
+    {
+      name     = "ec2-tg"
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        port                = 80
+        protocol            = "HTTP"
+        interval            = 20
+        timeout             = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 300
+      }
+    },
+    {
+      name     = "status-tg"
+      port     = 8080
+      protocol = "HTTP"
+      health_check = {
+        path                = "/status"
+        port                = 8080
+        protocol            = "HTTP"
+        interval            = 30
+        timeout             = 5
+        healthy_threshold   = 3
+        unhealthy_threshold = 2
+      }
+      stickiness = {
+        enabled  = true
+        type     = "lb_cookie"
+        duration = 600
+      }
+    }
+  ]
+
+  listeners = [
+    { port = 80, protocol = "HTTP", target_group = "ec2-tg" },
+    { port = 8080, protocol = "HTTP", target_group = "status-tg" }
+  ]
+}
+
+
+
+Resultado
+- O Target Group ec2-tg terá stickiness habilitado com cookie de 300 segundos.
+- O Target Group status-tg terá stickiness habilitado com cookie de 600 segundos.
+- O Load Balancer criará cookies de afinidade e manterá o cliente sempre na mesma instância durante o tempo configurado.
+- Isso garante consistência em sessões que dependem de estado (ex.: login, carrinho de compras)
+

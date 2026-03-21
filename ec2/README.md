@@ -2694,6 +2694,46 @@ Com isso, você consegue:
 • 	Garantir que cada regra de listener seja única por host, mas abrangente nos paths.
 
 
+###############
+###############
+
+Para passar essas tags obrigatórias via input no seu , você pode usar variáveis no Terraform e depois aplicar no recurso com  ou diretamente em . Aqui vai um exemplo prático:
+
+
+Definição das variáveis (variables.tf)
+
+variable "tags" {
+  description = "Tags obrigatórias para os recursos"
+  type = map(string)
+  default = {
+    Name        = "WEB-APP"
+    Enviroment  = "Dev"
+    Owner       = "Wanderson"
+    Tecnologia  = "EC2"
+    Application = "risk-manager"
+    Team        = "prevenção a Fraude"
+    Region      = "us-east-1"
+    Critical    = "Low"
+  }
+}
+
+
+ Uso no (main.tf)
+
+ provider "aws" {
+  region = var.tags["Region"]
+
+  default_tags {
+    tags = var.tags
+  }
+}
+
+resource "aws_instance" "web" {
+  ami           = "ami-1234567890abcdef0"
+  instance_type = "t2.micro"
+
+  tags = var.tags
+}
 
 ###############
 ###############
